@@ -99,7 +99,7 @@
         if (!audioCtx) return;
 
         const now = audioCtx.currentTime;
-        const frequencies =; // A5 followed by C#6
+        const frequencies = [880, 1100]; // A5 followed by C#6
 
         frequencies.forEach((freq, index) => {
           const osc = audioCtx.createOscillator();

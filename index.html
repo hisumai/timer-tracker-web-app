@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Volunteer Time Tracker</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 520px; margin: 40px auto; text-align: center; background: #f9f9f9; padding: 20px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    input, textarea { width: 90%; padding: 10px; margin: 8px 0; font-size: 15px; border: 1px solid #ccc; border-radius: 5px; }
+    button { cursor: pointer; padding: 10px 18px; margin: 6px; font-size: 15px; border: none; border-radius: 5px; background: #0066cc; color: white; }
+    button:hover { background: #004c99; }
+    #pauseBtn { background: #e69500; }
+    #stopBtn { background: #cc0000; }
+    .hidden { display: none; }
+    #timerDisplay { font-size: 52px; font-weight: bold; margin: 18px 0; color: #222; }
+    .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.65); }
+    .modalContent { background: #fff; margin: 12% auto; padding: 24px; width: 380px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+  </style>
+</head>
+<body>
+
+  <h2>Volunteer Time Tracker</h2>
+
+  <!-- Setup Screen -->
+  <div id="setupSection">
+    <input type="text" id="userName" placeholder="Your Name" required><br>
+    <input type="text" id="orgProject" placeholder="Organization or Project Name" required><br>
+    <textarea id="agendaInput" rows="2" placeholder="Agenda for the day" required></textarea><br>
+    <input type="text" id="initialTask" placeholder="First task to carry out" required><br>
+    <button onclick="startTracker()">Start Timer</button>
+  </div>
+
+  <!-- Active Timer Screen -->
+  <div id="trackerSection" class="hidden">
+    <p><strong>Volunteer:</strong> <span id="displayUser"></span> (<span id="displayOrg"></span>)</p>
+    <p><strong>Current Task:</strong> <span id="displayTask"></span></p>
+    <div id="timerDisplay">00:00</div>
+    <p id="statusText" style="color: green; font-weight: bold;">Status: Continuous Tracking</p>
+    <button id="pauseBtn" onclick="pauseTimer()">Pause (15m max)</button>
+    <button id="resumeBtn" class="hidden" onclick="resumeTimer()">Resume</button>
+    <button id="stopBtn" onclick="openStopModal()">Stop Timer</button>
+  </div>
+
+  <!-- Random Check-in Modal (25 < n < 30 mins) -->
+  <div id="checkinModal" class="modal hidden">
+    <div class="modalContent">
+      <h3>Task Check-in</h3>
+      <p>Enter your progress within 15 minutes or the timer will stop automatically.</p>
+      <input type="text" id="completedInput" placeholder="What task did you just complete?"><br>
+      <input type="text" id="nextTaskInput" placeholder="What task are you carrying out next?"><br>
+      <button onclick="submitCheckin()">Continue Tracking</button>
+    </div>
+  </div>
+
+  <!-- Stop Session Modal -->
+  <div id="stopModal" class="modal hidden">
+    <div class="modalContent">
+      <h3>Stop Session</h3>
+      <textarea id="finalCompletedInput" rows="2" placeholder="Tasks completed in this session"></textarea><br>
+      <textarea id="carryOverInput" rows="2" placeholder="What needs to be carried on next?"></textarea><br>
+      <button onclick="finalizeStop('MANUAL_STOP')">Save & Stop</button>
+    </div>
+  </div>
+
+  <script>
+    const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyHK3dcjgVFghwKbghY2ScVUoBaHUjVxBWm75P2tQKVBFtp3vXaFX38FlKR3MN1y5iA/exec";
+    let elapsedSeconds = 0;
+    let mainInterval = null;
+    let pauseTimeout = null;
+    let popupTimeout = null;
+    let nextCheckInSeconds = 0;
+    let isContinuous = true;
+
+    function getLocalDateTime() {
+      const now = new Date();
+      const localDate = now.toLocaleDateString("en-CA"); // YYYY-MM-DD in local time
+      const localTime = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      return { localDate, localTime };
+    }
+
+    function getRandomIntervalSeconds() {
+      const mins = Math.floor(Math.random() * 4) + 26; // Randomly picks 26, 27, 28, or 29 mins (25 < n < 30)
+      return mins * 60;
+    }
+
+    function sendToSheet(payload) {
+      const dt = getLocalDateTime();
+      payload.localDate = dt.localDate;
+      payload.localTime = dt.localTime;
+      payload.userName = document.getElementById("userName").value.trim();
+      payload.orgProject = document.getElementById("orgProject").value.trim();
+
+      fetch(SCRIPT_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    }
+
+    function startTracker() {
+      const user = document.getElementById("userName").value.trim();
+      const org = document.getElementById("orgProject").value.trim();
+      const agenda = document.getElementById("agendaInput").value.trim();
+      const task = document.getElementById("initialTask").value.trim();
+      if (!user || !org || !agenda || !task) return alert("Please fill in all fields.");
+
+      elapsedSeconds = 0;
+      isContinuous = true;
+      nextCheckInSeconds = getRandomIntervalSeconds();
+
+      document.getElementById("displayUser").innerText = user;
+      document.getElementById("displayOrg").innerText = org;
+      document.getElementById("displayTask").innerText = task;
+      document.getElementById("timerDisplay").innerText = "00:00";
+      document.getElementById("statusText").innerText = "Status: Continuous Tracking";
+      document.getElementById("statusText").style.color = "green";
+      document.getElementById("setupSection").classList.add("hidden");
+      document.getElementById("trackerSection").classList.remove("hidden");
+
+      sendToSheet({
+        action: "START",
+        agenda: agenda
+      });
+
+      runClock();
+    }
+
+    function runClock() {
+      clearInterval(mainInterval);
+      mainInterval = setInterval(() => {
+        elapsedSeconds++;
+        const mins = String(Math.floor(elapsedSeconds / 60)).padStart(2, "0");
+        const secs = String(elapsedSeconds % 60).padStart(2, "0");
+        document.getElementById("timerDisplay").innerText = `${mins}:${secs}`;
+
+        if (elapsedSeconds >= nextCheckInSeconds) {
+          triggerCheckinPopup();
+        }
+      }, 1000);
+    }
+
+    function pauseTimer() {
+      clearInterval(mainInterval);
+      isContinuous = false;
+      document.getElementById("statusText").innerText = "Status: Interrupted (Paused)";
+      document.getElementById("statusText").style.color = "orange";
+      document.getElementById("pauseBtn").classList.add("hidden");
+      document.getElementById("resumeBtn").classList.remove("hidden");
+
+      sendToSheet({
+        action: "PAUSE",
+        completed: "[Paused at " + getLocalDateTime().localTime + "]"
+      });
+
+      pauseTimeout = setTimeout(() => {
+        finalizeStop("AUTO_STOP_PAUSE_TIMEOUT");
+      }, 15 * 60 * 1000);
+    }
+
+    function resumeTimer() {
+      clearTimeout(pauseTimeout);
+      document.getElementById("statusText").innerText = "Status: Resumed (Had Interruption)";
+      document.getElementById("pauseBtn").classList.remove("hidden");
+      document.getElementById("resumeBtn").classList.add("hidden");
+      runClock();
+    }
+
+    function triggerCheckinPopup() {
+      clearInterval(mainInterval);
+      document.getElementById("checkinModal").classList.remove("hidden");
+
+      popupTimeout = setTimeout(() => {
+        document.getElementById("checkinModal").classList.add("hidden");
+        isContinuous = false;
+        finalizeStop("AUTO_STOP_POPUP_TIMEOUT");
+      }, 15 * 60 * 1000);
+    }
+
+    function submitCheckin() {
+      const done = document.getElementById("completedInput").value.trim();
+      const next = document.getElementById("nextTaskInput").value.trim();
+      if (!done || !next) return alert("Please enter both fields.");
+
+      clearTimeout(popupTimeout);
+      document.getElementById("displayTask").innerText = next;
+      document.getElementById("completedInput").value = "";
+      document.getElementById("nextTaskInput").value = "";
+      document.getElementById("checkinModal").classList.add("hidden");
+
+      sendToSheet({
+        action: "CHECKIN",
+        completed: done
+      });
+
+      nextCheckInSeconds = elapsedSeconds + getRandomIntervalSeconds();
+      runClock();
+    }
+
+    function openStopModal() {
+      clearInterval(mainInterval);
+      document.getElementById("stopModal").classList.remove("hidden");
+    }
+
+    function finalizeStop(reason) {
+      clearInterval(mainInterval);
+      clearTimeout(pauseTimeout);
+      clearTimeout(popupTimeout);
+
+      const finalDone = document.getElementById("finalCompletedInput").value.trim();
+      const currentTask = document.getElementById("displayTask").innerText;
+      const userCarryOver = document.getElementById("carryOverInput").value.trim();
+      const continuityNote = isContinuous ? "(Continuous)" : "(Interrupted - " + reason + ")";
+      const carryOverText = (userCarryOver || currentTask) + " " + continuityNote;
+      const hours = (elapsedSeconds / 3600).toFixed(2);
+
+      sendToSheet({
+        action: "STOP",
+        sessionHours: hours,
+        completed: finalDone,
+        carryOver: carryOverText
+      });
+
+      document.getElementById("initialTask").value = "";
+      document.getElementById("finalCompletedInput").value = "";
+      document.getElementById("carryOverInput").value = "";
+      document.getElementById("stopModal").classList.add("hidden");
+      document.getElementById("trackerSection").classList.add("hidden");
+      document.getElementById("setupSection").classList.remove("hidden");
+      alert("Session saved! Added " + hours + " hrs to today's total.");
+    }
+  </script>
+</body>
+</html>

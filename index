@@ -329,3 +329,6 @@ document.getElementById("trackerSection").classList.add("hidden");
 document.getElementById("setupSection").classList.remove("hidden");
 alert("Session saved! Added " + hours + " hrs to today's total.");
 }
+</script>
+</body>
+</html>

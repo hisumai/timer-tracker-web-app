@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Volunteer Time Tracker</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 520px; margin: 40px auto; text-align: center; background: #f9f9f9; padding: 20px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    input, textarea { width: 90%; padding: 10px; margin: 8px 0; font-size: 15px; border: 1px solid #ccc; border-radius: 5px; }
+    button { cursor: pointer; padding: 10px 18px; margin: 6px; font-size: 15px; border: none; border-radius: 5px; background: #0066cc; color: white; }
+    button:hover { background: #004c99; }
+    #pauseBtn { background: #e69500; }
+    #stopBtn { background: #cc0000; }
+    .hidden { display: none; }
+    #timerDisplay { font-size: 52px; font-weight: bold; margin: 18px 0; color: #222; }
+    .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.65); }
+    .modalContent { background: #fff; margin: 12% auto; padding: 24px; width: 380px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+  </style>
+</head>
+<body>
+
+  <h2>Volunteer Time Tracker</h2>
+
+  <!-- Setup Screen -->
+  <div id="setupSection">
+    <input type="text" id="userName" placeholder="Your Name" required><br>
+    <input type="text" id="orgProject" placeholder="Organization or Project Name" required><br>
+    <textarea id="agendaInput" rows="2" placeholder="Agenda for the day" required></textarea><br>
+    <input type="text" id="initialTask" placeholder="First task to carry out" required><br>
+    <button onclick="startTracker()">Start Timer</button>
+  </div>
+
+  <!-- Active Timer Screen -->
+  <div id="trackerSection" class="hidden">
+    <p><strong>Volunteer:</strong> <span id="displayUser"></span> (<span id="displayOrg"></span>)</p>
+    <p><strong>Current Task:</strong> <span id="displayTask"></span></p>
+    <div id="timerDisplay">00:00</div>
+    <p id="statusText" style="color: green; font-weight: bold;">Status: Continuous Tracking</p>
+    <button id="pauseBtn" onclick="pauseTimer()">Pause (15m max)</button>
+    <button id="resumeBtn" class="hidden" onclick="resumeTimer()">Resume</button>
+    <button id="stopBtn" onclick="openStopModal()">Stop Timer</button>
+  </div>
+
+  <!-- Random Check-in Modal (25 < n < 30 mins) -->
+  <div id="checkinModal" class="modal hidden">
+    <div class="modalContent">
+      <h3>Task Check-in</h3>
+      <p>Enter your progress within 15 minutes or the timer will stop automatically.</p>
+      <input type="text" id="completedInput" placeholder="What task did you just complete?"><br>
+      <input type="text" id="nextTaskInput" placeholder="What task are you carrying out next?"><br>
+      <button onclick="submitCheckin()">Continue Tracking</button>
+    </div>
+  </div>
+
+  <!-- Stop Session Modal -->
+  <div id="stopModal" class="modal hidden">
+    <div class="modalContent">
+      <h3>Stop Session</h3>
+      <textarea id="finalCompletedInput" rows="2" placeholder="Tasks completed in this session"></textarea><br>
+      <textarea id="carryOverInput" rows="2" placeholder="What needs to be carried on next?"></textarea><br>
+      <button onclick="finalizeStop('MANUAL_STOP')">Save & Stop</button>
+    </div>
+  </div>
+
+  <script>
+    const SCRIPT_URL = "https://google.com";
+    
+    let accumulatedSeconds = 0;
+    let segmentStartTime = null;
+    let timerState = "IDLE"; // IDLE, RUNNING, PAUSED, CHECKIN
+    let pauseStartTime = null;
+    let checkinStartTime = null;
+    let lastBeepTime = 0;
+
+    let mainInterval = null;
+    let nextCheckInSeconds = 0;
+    let isContinuous = true;
+    let audioCtx = null;
+
+    const MAX_IDLE_SECONDS = 15 * 60; // 15 minutes
+    const BEEP_INTERVAL_SECONDS = 60; // Repeat beep every 1 minute
+
+    // Initialize Web Audio API on user click so background tab audio is permitted
+    function initAudio() {
+      if (!audioCtx) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (AudioContextClass) {
+          audioCtx = new AudioContextClass();
+        }
+      }
+      if (audioCtx && audioCtx.state === "suspended") {
+        audioCtx.resume();
+      }
+    }
+
+    // Plays a clear two-tone chime that works across tabs without external audio files
+    function playBeepAlarm() {
+      try {
+        initAudio();
+        if (!audioCtx) return;
+
+        const now = audioCtx.currentTime;
+        const frequencies =; // A5 followed by C#6
+
+        frequencies.forEach((freq, index) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(freq, now + index * 0.2);
+
+          gain.gain.setValueAtTime(0.001, now + index * 0.2);
+          gain.gain.exponentialRampToValueAtTime(0.3, now + index * 0.2 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + index * 0.2 + 0.18);
+
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+
+          osc.start(now + index * 0.2);
+          osc.stop(now + index * 0.2 + 0.19);
+        });
+      } catch (e) {
+        console.warn("Audio alert blocked or unsupported:", e);
+      }
+    }
+
+    function getCurrentElapsedSeconds() {
+      if (timerState === "RUNNING" && segmentStartTime) {
+        return accumulatedSeconds + Math.floor((Date.now() - segmentStartTime) / 1000);
+      }
+      return accumulatedSeconds;
+    }
+
+    function updateTimerDisplay(totalSeconds) {
+      const hrs = Math.floor(totalSeconds / 3600);
+      const mins = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0");
+      const secs = String(totalSeconds % 60).padStart(2, "0");
+      const formatted = hrs > 0 ? `${hrs}:${mins}:${secs}` : `${mins}:${secs}`;
+      document.getElementById("timerDisplay").innerText = formatted;
+      document.title = `(${formatted}) Volunteer Time Tracker`;
+    }
+
+    function getLocalDateTime() {
+      const now = new Date();
+      const localDate = now.toLocaleDateString("en-CA"); // YYYY-MM-DD in local time
+      const localTime = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      return { localDate, localTime };
+    }
+
+    function getRandomIntervalSeconds() {
+      const mins = Math.floor(Math.random() * 4) + 26; // Randomly picks 26, 27, 28, or 29 mins (25 < n < 30)
+      return mins * 60;
+    }
+
+    function sendToSheet(payload) {
+      const dt = getLocalDateTime();
+      payload.localDate = dt.localDate;
+      payload.localTime = dt.localTime;
+      payload.userName = document.getElementById("userName").value.trim();
+      payload.orgProject = document.getElementById("orgProject").value.trim();
+
+      fetch(SCRIPT_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    }
+
+    function startTracker() {
+      const user = document.getElementById("userName").value.trim();
+      const org = document.getElementById("orgProject").value.trim();
+      const agenda = document.getElementById("agendaInput").value.trim();
+      const task = document.getElementById("initialTask").value.trim();
+      if (!user || !org || !agenda || !task) return alert("Please fill in all fields.");
+
+      // Unlock browser audio permissions immediately upon clicking Start
+      initAudio();
+
+      accumulatedSeconds = 0;
+      isContinuous = true;
+      nextCheckInSeconds = getRandomIntervalSeconds();
+
+      document.getElementById("displayUser").innerText = user;
+      document.getElementById("displayOrg").innerText = org;
+      document.getElementById("displayTask").innerText = task;
+      document.getElementById("timerDisplay").innerText = "00:00";
+      document.getElementById("statusText").innerText = "Status: Continuous Tracking";
+      document.getElementById("statusText").style.color = "green";
+      document.getElementById("pauseBtn").classList.remove("hidden");
+      document.getElementById("resumeBtn").classList.add("hidden");
+      document.getElementById("setupSection").classList.add("hidden");
+      document.getElementById("trackerSection").classList.remove("hidden");
+
+      sendToSheet({
+        action: "START",
+        agenda: agenda
+      });
+
+      runClock();
+    }
+
+    function runClock() {
+      clearInterval(mainInterval);
+      segmentStartTime = Date.now();
+      timerState = "RUNNING";
+      mainInterval = setInterval(tick, 250);
+    }
+
+    function tick() {
+      if (timerState === "RUNNING") {
+        const currentElapsed = getCurrentElapsedSeconds();
+        updateTimerDisplay(currentElapsed);
+
+        if (currentElapsed >= nextCheckInSeconds) {
+          triggerCheckinPopup();
+        }
+      } else if (timerState === "PAUSED" && pauseStartTime) {
+        if ((Date.now() - pauseStartTime) / 1000 >= MAX_IDLE_SECONDS) {
+          finalizeStop("AUTO_STOP_PAUSE_TIMEOUT");
+        }
+      } else if (timerState === "CHECKIN" && checkinStartTime) {
+        const idleSeconds = (Date.now() - checkinStartTime) / 1000;
+        
+        // Auto-stop if 15 minutes have passed without check-in
+        if (idleSeconds >= MAX_IDLE_SECONDS) {
+          document.getElementById("checkinModal").classList.add("hidden");
+          isContinuous = false;
+          finalizeStop("AUTO_STOP_POPUP_TIMEOUT");
+          return;
+        }
+
+        // Play beep alarm every 1 minute during the 15-minute check-in window
+        if ((Date.now() - lastBeepTime) / 1000 >= BEEP_INTERVAL_SECONDS) {
+          playBeepAlarm();
+          lastBeepTime = Date.now();
+        }
+      }
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && timerState !== "IDLE") {
+        tick();
+      }
+    });
+
+    function pauseTimer() {
+      accumulatedSeconds = getCurrentElapsedSeconds();
+      segmentStartTime = null;
+      timerState = "PAUSED";
+pauseStartTime = Date.now();
+isContinuous = false;
+document.title = "⏸ Paused - Volunteer Time Tracker";
+document.getElementById("statusText").innerText = "Status: Interrupted (Paused)";
+document.getElementById("statusText").style.color = "orange";
+document.getElementById("pauseBtn").classList.add("hidden");
+document.getElementById("resumeBtn").classList.remove("hidden");
+sendToSheet({
+action: "PAUSE",
+completed: "[Paused at " + getLocalDateTime().localTime + "]"
+});
+}
+function resumeTimer() {
+pauseStartTime = null;
+document.getElementById("statusText").innerText = "Status: Resumed (Had Interruption)";
+document.getElementById("statusText").style.color = "green";
+document.getElementById("pauseBtn").classList.remove("hidden");
+document.getElementById("resumeBtn").classList.add("hidden");
+runClock();
+}
+function triggerCheckinPopup() {
+accumulatedSeconds = getCurrentElapsedSeconds();
+segmentStartTime = null;
+timerState = "CHECKIN";
+checkinStartTime = Date.now();
+lastBeepTime = Date.now();
+document.title = "🔔 CHECK-IN REQUIRED!";
+document.getElementById("checkinModal").classList.remove("hidden");
+// Play initial beep immediately when popup triggers
+playBeepAlarm();
+}
+function submitCheckin() {
+const done = document.getElementById("completedInput").value.trim();
+const next = document.getElementById("nextTaskInput").value.trim();
+if (!done || !next) return alert("Please enter both fields.");
+checkinStartTime = null;
+document.getElementById("displayTask").innerText = next;
+document.getElementById("completedInput").value = "";
+document.getElementById("nextTaskInput").value = "";
+document.getElementById("checkinModal").classList.add("hidden");
+sendToSheet({
+action: "CHECKIN",
+completed: done
+});
+nextCheckInSeconds = accumulatedSeconds + getRandomIntervalSeconds();
+runClock();
+}
+function openStopModal() {
+accumulatedSeconds = getCurrentElapsedSeconds();
+segmentStartTime = null;
+timerState = "PAUSED";
+clearInterval(mainInterval);
+document.getElementById("stopModal").classList.remove("hidden");
+}
+function finalizeStop(reason) {
+const finalElapsed = getCurrentElapsedSeconds();
+clearInterval(mainInterval);
+timerState = "IDLE";
+segmentStartTime = null;
+pauseStartTime = null;
+checkinStartTime = null;
+const finalDone = document.getElementById("finalCompletedInput").value.trim();
+const currentTask = document.getElementById("displayTask").innerText;
+const userCarryOver = document.getElementById("carryOverInput").value.trim();
+const continuityNote = isContinuous ? "(Continuous)" : "(Interrupted - " + reason + ")";
+const carryOverText = (userCarryOver || currentTask) + " " + continuityNote;
+const hours = (finalElapsed / 3600).toFixed(2);
+sendToSheet({
+action: "STOP",
+sessionHours: hours,
+completed: finalDone,
+carryOver: carryOverText
+});
+document.title = "Volunteer Time Tracker";
+document.getElementById("initialTask").value = "";
+document.getElementById("finalCompletedInput").value = "";
+document.getElementById("carryOverInput").value = "";
+document.getElementById("stopModal").classList.add("hidden");
+document.getElementById("trackerSection").classList.add("hidden");
+document.getElementById("setupSection").classList.remove("hidden");
+alert("Session saved! Added " + hours + " hrs to today's total.");
+}
